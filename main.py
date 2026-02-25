@@ -1,150 +1,109 @@
 import telebot
-import json
-import os
+import pymongo
+import random
 import time
-from flask import Flask
-from threading import Thread
+from datetime import datetime
+from telebot import types
 
-# --- CONFIGURATION ---
-API_TOKEN = '8052478407:AAHgn5heLnCixh1PUXG-8sSiL8brigtO5fM' 
+# --- [CONFIGURED DETAILS] ---
+TOKEN = "8052478407:AAHgn5heLnCixh1PUXG-8sSiL8brigtO5fM"
 ADMIN_ID = 6130849132
-
-# Aapki IDs
-CHANNEL_ID = -1001905966650 
+CHANNEL_ID = -1001905966650
 GROUP_ID = -1003430728423
-CHANNEL_LINK = 'https://t.me/onlineincome_x'
-GROUP_LINK = 'https://t.me/moneymakersboys'
+CHANNEL_LINK = "https://t.me/onlineincome_x"
+GROUP_LINK = "https://t.me/moneymakersboys"
 
-bot = telebot.TeleBot(API_TOKEN)
-app = Flask('')
+bot = telebot.TeleBot(TOKEN)
+client = pymongo.MongoClient("mongodb+srv://mosiffuiego_db_user:9RTLIPCOzi2qPIGr@cluster0.ly0dot0.mongodb.net/?appName=Cluster0")
+db = client['MoneyTarDB']
+users_col = db['users']
+settings_col = db['settings']
 
-@app.route('/')
-def home(): return "Bot is Online"
+# Settings Initialization
+if not settings_col.find_one({"id": "bot_config"}):
+    settings_col.insert_one({"id": "bot_config", "is_on": True, "back_time": "Soon", "m_msg": "Upgrading Servers"})
 
-def run(): app.run(host='0.0.0.0', port=8080)
+# --- 🧠 BOT BRAIN FUNCTIONS ---
+def get_config():
+    return settings_col.find_one({"id": "bot_config"})
 
-def keep_alive():
-    t = Thread(target=run)
-    t.daemon = True
-    t.start()
-
-# --- DATABASE ---
-def load_data():
-    if not os.path.exists('users.json'): return {}
+def is_joined(uid):
     try:
-        with open('users.json', 'r') as f: return json.load(f)
-    except: return {}
+        c = bot.get_chat_member(CHANNEL_ID, uid).status
+        g = bot.get_chat_member(GROUP_ID, uid).status
+        return c in ['member', 'administrator', 'creator'] and g in ['member', 'administrator', 'creator']
+    except: return False
 
-def save_data(data):
-    with open('users.json', 'w') as f: json.dump(data, f, indent=4)
+def get_user(uid, name="User"):
+    uid = str(uid)
+    user = users_col.find_one({"uid": uid})
+    if not user:
+        user = {"uid": uid, "bal": 0.0, "ref": 0, "spins": 0, "name": name, "last_bonus": ""}
+        users_col.insert_one(user)
+    return user
 
-# --- JOIN CHECK FUNCTION ---
-def is_joined(user_id):
-    try:
-        ch = bot.get_chat_member(CHANNEL_ID, user_id).status
-        gr = bot.get_chat_member(GROUP_ID, user_id).status
-        allowed = ['member', 'administrator', 'creator']
-        if ch in allowed and gr in allowed:
-            return True
+# --- 🛠️ MAINTENANCE MIDDLEWARE ---
+def check_maintenance(message):
+    config = get_config()
+    if not config['is_on'] and message.from_user.id != ADMIN_ID:
+        text = f"🛠️ **BOT UNDER MAINTENANCE** 🛠️\n\nReason: {config['m_msg']}\n⏰ Back Online: `{config['back_time']}`\n\nStay tuned in our channel!"
+        img = "https://img.freepik.com/free-vector/maintenance-concept-illustration_114360-381.jpg"
+        bot.send_photo(message.chat.id, img, caption=text, parse_mode='Markdown')
         return False
-    except:
-        return False
+    return True
 
-# --- START COMMAND ---
+# --- 🏠 START & MAIN MENU ---
 @bot.message_handler(commands=['start'])
 def start(message):
-    uid = str(message.chat.id)
-    data = load_data()
+    if not check_maintenance(message): return
+    uid = message.from_user.id
     
-    # 1. Check if user joined
     if not is_joined(uid):
-        markup = telebot.types.InlineKeyboardMarkup()
-        markup.add(telebot.types.InlineKeyboardButton("📢 Channel", url=CHANNEL_LINK))
-        markup.add(telebot.types.InlineKeyboardButton("👥 Group", url=GROUP_LINK))
-        markup.add(telebot.types.InlineKeyboardButton("✅ Check Joined", callback_data="verify"))
-        bot.send_message(uid, "⚠️ <b>Access Denied!</b>\n\nAapne Channel ya Group join nahi kiya hai.", parse_mode="html", reply_markup=markup)
-        return
+        m = types.InlineKeyboardMarkup()
+        m.add(types.InlineKeyboardButton("📢 Channel", url=CHANNEL_LINK), types.InlineKeyboardButton("💬 Group", url=GROUP_LINK))
+        m.add(types.InlineKeyboardButton("🔄 Check Join", callback_data="check_join"))
+        return bot.send_message(message.chat.id, "❌ **Access Denied!** Join both to continue:", reply_markup=m)
 
-    # 2. Add New User + Refer Logic
-    if uid not in data:
-        ref_by = message.text.split()[1] if len(message.text.split()) > 1 else None
-        data[uid] = {'bal': 0, 'invited': 0, 'last_ad': 0, 'last_bonus': 0}
-        
-        if ref_by and ref_by in data and ref_by != uid:
-            data[ref_by]['bal'] += 20
-            data[ref_by]['invited'] += 1
-            bot.send_message(ref_by, "🔔 New Referral! You earned 20 Rs.")
-        save_data(data)
+    user = get_user(uid, message.from_user.first_name)
+    
+    # Referral Logic (1 Refer = 1 Spin)
+    args = message.text.split()
+    if len(args) > 1 and args[1] != str(uid):
+        if not users_col.find_one({"uid": str(uid)}):
+            users_col.update_one({"uid": args[1]}, {"$inc": {"spins": 1, "ref": 1}})
+            bot.send_message(args[1], "🔔 **New Referral!** You got **1 Spin Ticket**! 🎡")
 
-    # 3. Main Menu (Replit Style)
-    main_menu = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-    main_menu.add("💰 Balance", "🔗 Invite")
-    main_menu.add("📺 Watch Ad", "🎁 Daily Bonus")
-    main_menu.add("🏧 Withdraw")
-    bot.send_message(uid, "👋 Welcome! Aapka account active hai.\nEarn 20 Rs per invite.", reply_markup=main_menu)
+    hour = datetime.now().hour
+    greet = "Good Morning ☀️" if 5<=hour<12 else "Good Afternoon 🌤️" if 12<=hour<17 else "Good Evening 🌆"
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row("🎡 Lucky Spin", "📅 Daily Bonus")
+    markup.row("💰 Wallet", "🏦 Withdraw")
+    markup.row("🏆 Leaderboard", "📸 Submit Task")
+    markup.row("👥 Refer & Earn", "👨‍💻 Support")
+    if uid == ADMIN_ID: markup.row("⚙️ Admin Panel")
+    
+    bot.send_message(message.chat.id, f"💎 **{greet}, {message.from_user.first_name}!**\n\n💰 Balance: ₹{user['bal']}\n🎡 Spins: {user['spins']}", reply_markup=markup)
 
-# --- VERIFY CALLBACK ---
-@bot.callback_query_handler(func=lambda call: call.data == "verify")
-def verify(call):
-    if is_joined(call.message.chat.id):
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        start(call.message)
+# --- 🎡 SPIN LOGIC ---
+@bot.message_handler(func=lambda m: m.text == "🎡 Lucky Spin")
+def spin(message):
+    if not check_maintenance(message): return
+    user = get_user(message.from_user.id)
+    if user['spins'] < 1:
+        return bot.reply_to(message, "❌ No Spins! Refer friends to get spins.")
+    
+    win = random.choice([0, 0.5, 1, 2, 5, 0, 1, 10])
+    users_col.update_one({"uid": str(user['uid'])}, {"$inc": {"spins": -1, "bal": win}})
+    bot.send_message(message.chat.id, f"🎡 Spinning... You won **₹{win}**!")
+
+# --- 🏦 WITHDRAW & GST ---
+@bot.message_handler(func=lambda m: m.text == "🏦 Withdraw")
+def withdraw(message):
+    if not check_maintenance(message): return
+    user = get_user(message.from_user.id)
+    if user['bal'] < 400:
+        bot.reply_to(message, f"❌ Min withdrawal ₹400. Needed: ₹{400 - user['bal']}")
     else:
-        bot.answer_callback_query(call.id, "❌ Join First!", show_alert=True)
-
-# --- BUTTON LOGIC (REPLIT STYLE) ---
-@bot.message_handler(func=lambda message: True)
-def handle_buttons(message):
-    uid = str(message.chat.id)
-    
-    # Force join check for every button click
-    if not is_joined(uid):
-        bot.send_message(uid, "❌ Please join our channel and group first!")
-        return
-
-    data = load_data()
-    if uid not in data: data[uid] = {'bal': 0, 'invited': 0, 'last_ad': 0, 'last_bonus': 0}
-
-    if message.text == "💰 Balance":
-        bot.send_message(uid, f"📊 <b>Account Details:</b>\n\n💳 Balance: {data[uid]['bal']} Rs\n👥 Invites: {data[uid]['invited']}", parse_mode="html")
-
-    elif message.text == "🔗 Invite":
-        bot_user = bot.get_me().username
-        ref_link = f"https://t.me/{bot_user}?start={uid}"
-        bot.send_message(uid, f"🎁 <b>Invite & Earn</b>\n\nEarn 20 Rs per refer!\n🔗 Link: {ref_link}", parse_mode="html")
-
-    elif message.text == "📺 Watch Ad":
-        now = time.time()
-        if now - data[uid].get('last_ad', 0) > 60:
-            data[uid]['bal'] += 2
-            data[uid]['last_ad'] = now
-            save_data(data)
-            bot.send_message(uid, "✅ Ad watched! 2 Rs added.")
-        else:
-            bot.send_message(uid, "⏳ Wait 60 seconds.")
-
-    elif message.text == "🎁 Daily Bonus":
-        now = time.time()
-        if now - data[uid].get('last_bonus', 0) > 86400:
-            data[uid]['bal'] += 5
-            data[uid]['last_bonus'] = now
-            save_data(data)
-            bot.send_message(uid, "🎁 5 Rs Bonus added!")
-        else:
-            bot.send_message(uid, "❌ Come back tomorrow.")
-
-    elif message.text == "🏧 Withdraw":
-        if data[uid]['bal'] >= 250:
-            bot.send_message(uid, "📤 Send UPI ID & Amount (Ex: abc@ybl 250):")
-        else:
-            bot.send_message(uid, f"❌ Min withdraw 250 Rs.\nYour balance: {data[uid]['bal']} Rs")
-
-# --- AUTO ACCEPT ---
-@bot.chat_join_request_handler()
-def handle_request(request):
-    try: bot.approve_chat_join_request(request.chat.id, request.from_user.id)
-    except: pass
-
-if __name__ == "__main__":
-    keep_alive()
-    bot.polling(none_stop=True)
+        gst = user['bal'] * 0.28
+        bot
